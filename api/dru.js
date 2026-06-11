@@ -1,7 +1,7 @@
 // dru_api.js — add this to the nsag-api Vercel project as api/dru.js
 // Handles both POST (store survey response) and GET (dashboard data retrieval)
 // Uses same Upstash Redis instance as nsag-api
-// Dashboard key: set DREW_DASHBOARD_KEY env var before deploy. Never hardcode here.
+// Dashboard key: set DRU_DASHBOARD_KEY env var before deploy. Never hardcode here.
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -13,13 +13,13 @@ export default async function handler(req, res) {
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
   // ── POST: store a survey response ──────────────────────────────────
   if (req.method === 'POST') {
-    const { sessionCode, type, scores, timestamp } = req.body;
+    const { sessionCode, type, scores, timestamp, demographics } = req.body;
     if (!sessionCode || !type || !scores) {
       return res.status(200).json({ success: true }); // silent fail
     }
 
     const redisKey = `drew:${type}:${sessionCode.toUpperCase()}`;
-    const entry = JSON.stringify({ sessionCode: sessionCode.toUpperCase(), type, scores, timestamp });
+    const entry = JSON.stringify({ sessionCode: sessionCode.toUpperCase(), type, scores, timestamp, demographics: demographics || null });
 
     try {
       // Store response in list for this session + type
@@ -55,12 +55,14 @@ export default async function handler(req, res) {
 
   // ── GET: retrieve dashboard data ───────────────────────────────────
   if (req.method === 'GET') {
-    const dashKey = process.env.DREW_DASHBOARD_KEY;
+    const dashKey       = process.env.DRU_DASHBOARD_KEY;
+    const researcherKey = process.env.DRU_RESEARCHER_KEY;
     if (!dashKey) {
       return res.status(503).json({ error: 'Dashboard not configured' });
     }
-    const providedKey = req.query.key;
-    if (providedKey !== dashKey) {
+    const providedKey  = req.query.key;
+    const isResearcher = researcherKey && providedKey === researcherKey;
+    if (providedKey !== dashKey && !isResearcher) {
       return res.status(403).json({ error: 'Invalid key' });
     }
 
@@ -75,6 +77,7 @@ export default async function handler(req, res) {
       // Get all pre and post responses across all sessions
       const allPre = [];
       const allPost = [];
+      const allFollowup = [];
 
       for (const session of sessions) {
         const preRes = await fetch(`${redisBase}/lrange/drew:pre:${session}/0/-1`, {
@@ -96,12 +99,24 @@ export default async function handler(req, res) {
             try { allPost.push(typeof r === 'string' ? JSON.parse(r) : r); } catch (e) {}
           });
         }
+
+        const followupRes = await fetch(`${redisBase}/lrange/drew:followup:${session}/0/-1`, {
+          headers: { Authorization: `Bearer ${redisToken}` }
+        });
+        const followupData = await followupRes.json();
+        if (followupData.result) {
+          followupData.result.forEach(r => {
+            try { allFollowup.push(typeof r === 'string' ? JSON.parse(r) : r); } catch (e) {}
+          });
+        }
       }
 
       return res.status(200).json({
         sessions: sessions.sort(),
         pre: allPre,
-        post: allPost
+        post: allPost,
+        followup: allFollowup,
+        isResearcher
       });
 
     } catch (e) {
