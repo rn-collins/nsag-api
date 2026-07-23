@@ -103,7 +103,7 @@ function buildEmailHTML({ email, org, source, mod, tier, scores }) {
 
       <!-- FOOTER -->
       <tr><td style="padding:20px 36px;text-align:center;background:#f6f3ec;border-radius:0 0 4px 4px;">
-        <p style="margin:0;font-family:Arial,sans-serif;font-size:11px;color:#8A8497;">© 2026 RN Collins LLC · Aloha AI Consulting · <a href="mailto:collins.ra@northeastern.edu" style="color:#4D45A8;text-decoration:none;">collins.ra@northeastern.edu</a></p>
+        <p style="margin:0;font-family:Arial,sans-serif;font-size:11px;color:#8A8497;">© 2026 Rayven-Nikkita Collins LLC · Honolulu, Hawai&#699;i · <a href="mailto:collins.ra@northeastern.edu" style="color:#4D45A8;text-decoration:none;">collins.ra@northeastern.edu</a></p>
         ${org ? `<p style="margin:6px 0 0;font-family:Arial,sans-serif;font-size:11px;color:#8A8497;">Sent to ${email} · ${org}</p>` : ''}
       </td></tr>
 
@@ -152,23 +152,33 @@ export default async function handler(req, res) {
       body: JSON.stringify([email])
     });
 
-    // 2. Send dimension report email via Resend
+    // 2. Send dimension report email via Resend (with delivery-status capture)
+    let emailStatus = 'skipped (no RESEND_API_KEY or no scores)';
     if (process.env.RESEND_API_KEY && scores) {
       const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
       const fromName = 'NSAG — Neurocognitive Systems Advisory Group';
-      await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          from: `${fromName} <${fromEmail}>`,
-          to: email,
-          subject: `Your NSAG Readiness Report — ${TIER_LABELS[tier] || tier}`,
-          html: buildEmailHTML({ email, org: org || '', source, mod, tier, scores })
-        })
-      });
+      try {
+        const rr = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            from: `${fromName} <${fromEmail}>`,
+            to: email,
+            subject: `Your NSAG Readiness Report — ${TIER_LABELS[tier] || tier}`,
+            html: buildEmailHTML({ email, org: org || '', source, mod, tier, scores })
+          })
+        });
+        const rbody = await rr.json().catch(() => ({}));
+        emailStatus = rr.ok
+          ? `sent ✓ (id ${rbody.id || 'n/a'}, from ${fromEmail})`
+          : `FAILED ${rr.status}: ${rbody.message || JSON.stringify(rbody)} — sender ${fromEmail}`;
+      } catch (e) {
+        emailStatus = `ERROR: ${e.message}`;
+      }
+      if (!emailStatus.startsWith('sent')) console.error('NSAG report email problem:', emailStatus);
     }
 
     // 3. Slack alert
@@ -176,7 +186,7 @@ export default async function handler(req, res) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: `🧠 *New NSAG Lead*\n*Module:* ${mod} | *Tier:* ${tier?.toUpperCase()}\n*Email:* ${email}\n*Org:* ${org || '(not provided)'}\n*Source:* ${source}\n*Time:* ${new Date().toLocaleString('en-US', { timeZone: 'Pacific/Honolulu' })} HST`
+        text: `🧠 *New NSAG Lead*\n*Module:* ${mod} | *Tier:* ${tier?.toUpperCase()}\n*Email:* ${email}\n*Org:* ${org || '(not provided)'}\n*Source:* ${source}\n*Report email:* ${emailStatus}\n*Time:* ${new Date().toLocaleString('en-US', { timeZone: 'Pacific/Honolulu' })} HST`
       })
     });
 
