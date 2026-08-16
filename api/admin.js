@@ -1,55 +1,58 @@
-// api/admin.js — NSAG lead intelligence admin endpoint
-// Add to nsag-api Vercel project alongside lead.js and dru.js
-// Env vars: UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, NSAG_ADMIN_KEY
+const SITE_ORIGINS = new Set([
+  'https://nsag-site.vercel.app',
+  ...Array.from({ length: 15 }, (_, i) => `https://nsag-m${i + 1}.vercel.app`)
+]);
+
+function setCors(req, res, methods) {
+  const origin = req.headers.origin;
+  if (SITE_ORIGINS.has(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', methods);
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+}
+
+import crypto from 'node:crypto';
+
+function authorized(req) {
+  const configured = process.env.NSAG_ADMIN_KEY;
+  const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!configured || !provided) return false;
+  const a = Buffer.from(configured);
+  const b = Buffer.from(provided);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  setCors(req, res, 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
-  const adminKey = process.env.NSAG_ADMIN_KEY;
-  if (!adminKey) return res.status(503).json({ error: 'Admin not configured' });
-
-  const providedKey = req.query.key;
-  if (providedKey !== adminKey) return res.status(403).json({ error: 'Invalid key' });
-
-  const redisBase = process.env.UPSTASH_REDIS_REST_URL;
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!process.env.NSAG_ADMIN_KEY || !process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    return res.status(503).json({ error: 'Operator access is not configured' });
+  }
+  if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const sources = ['nsag-m3','nsag-m4','nsag-m5','nsag-m6','nsag-m7','nsag-m8','nsag-m9','nsag-contact'];
-    const allLeads = [];
-
-    for (const source of sources) {
-      const res2 = await fetch(`${redisBase}/lrange/leads:nsag:${source}/0/-1`, {
-        headers: { Authorization: `Bearer ${redisToken}` }
-      });
-      const data = await res2.json();
-      if (data.result) {
-        data.result.forEach(r => {
-          try {
-            const lead = typeof r === 'string' ? JSON.parse(r) : r;
-            allLeads.push({ ...lead, source });
-          } catch(e) {}
-        });
-      }
-    }
-
-    // Sort by timestamp descending
-    allLeads.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
-
-    return res.status(200).json({
-      leads: allLeads,
-      total: allLeads.length,
-      sources: sources.reduce((acc, s) => {
-        acc[s] = allLeads.filter(l => l.source === s).length;
-        return acc;
-      }, {})
+    const base = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    const keysResponse = await fetch(`${base}/keys/${encodeURIComponent('nsag:inquiry:*')}`, {
+      headers: { Authorization: `Bearer ${token}` }
     });
-
-  } catch(e) {
-    return res.status(500).json({ error: 'Data retrieval failed' });
+    if (!keysResponse.ok) throw new Error('storage unavailable');
+    const keys = (await keysResponse.json()).result || [];
+    const inquiries = [];
+    for (const key of keys.slice(0, 200)) {
+      const response = await fetch(`${base}/get/${encodeURIComponent(key)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) continue;
+      const value = (await response.json()).result;
+      try { if (value) inquiries.push(JSON.parse(value)); } catch {}
+    }
+    inquiries.sort((a, b) => String(b.consentedAt).localeCompare(String(a.consentedAt)));
+    return res.status(200).json({ inquiries, total: inquiries.length, retention: '90 days' });
+  } catch {
+    return res.status(503).json({ error: 'Operator data is unavailable' });
   }
 }
