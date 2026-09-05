@@ -1,5 +1,10 @@
 const SITE_ORIGINS = new Set([
   'https://nsag-site.vercel.app',
+  // The admin dashboard is the only client of /api/admin and was not on this
+  // list, so its preflight came back without Access-Control-Allow-Origin and
+  // the browser discarded every response. Only this file needs it: the other
+  // handlers serve the public modules, not the dashboard.
+  'https://nsag-admin.vercel.app',
   ...Array.from({ length: 15 }, (_, i) => `https://nsag-m${i + 1}.vercel.app`)
 ]);
 
